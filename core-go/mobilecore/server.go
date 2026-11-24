@@ -6,8 +6,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/go-filesystems/osfs"
+	"github.com/go-filesystems/smb"
+	"github.com/sky22333/android-netboot/core-go/internal/isodisk"
 )
 
 type server struct {
@@ -18,6 +23,10 @@ type server struct {
 	wg        sync.WaitGroup
 	http      *http.Server
 	httpLn    net.Listener
+	isoDiskLn net.Listener
+	smbLn     net.Listener
+	smb       *smb.Server
+	windowsFS *osfs.FS
 	udp       []net.PacketConn
 	leases    *leasePool
 }
@@ -35,6 +44,14 @@ func (s *server) start() error {
 		return fmt.Errorf("listen HTTP: %w", err)
 	}
 	s.httpLn = httpLn
+	if s.cfg.ISODiskPort != 0 {
+		s.isoDiskLn, err = net.Listen("tcp4", net.JoinHostPort(s.cfg.ListenIP, fmt.Sprint(s.cfg.ISODiskPort)))
+		if err != nil {
+			s.closeListeners()
+			cancel()
+			return fmt.Errorf("listen ISO disk: %w", err)
+		}
+	}
 	tftpConn, err := net.ListenPacket("udp4", net.JoinHostPort(s.cfg.ListenIP, "69"))
 	if err != nil {
 		s.closeListeners()
@@ -53,9 +70,40 @@ func (s *server) start() error {
 		s.udp = append(s.udp, conn)
 	}
 
+	if s.cfg.SMBPassword != "" {
+		if err := s.openWindowsShare(); err != nil {
+			s.closeListeners()
+			cancel()
+			return err
+		}
+	}
 	s.startedAt = time.Now()
 	s.http = newHTTPServer(s.cfg, s.sink)
 	s.http.ConnState = s.httpConnectionState
+	if s.isoDiskLn != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			catalog := "nbiso"
+			images := ""
+			if s.cfg.SMBPassword != "" {
+				catalog = "iso-menu"
+				images = filepath.Join(filepath.Dir(s.cfg.Root), "iso")
+			}
+			if err := isodisk.Serve(ctx, s.isoDiskLn, filepath.Join(s.cfg.Root, catalog, "items"), images, 8); err != nil {
+				s.sink.emit("error", "runtime", "iso_disk_failed", map[string]string{"error": err.Error()})
+			}
+		}()
+	}
+	if s.smbLn != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			if err := s.smb.Serve(s.smbLn); err != nil && !errors.Is(err, net.ErrClosed) && ctx.Err() == nil {
+				s.sink.emit("error", "runtime", "smb_failed", map[string]string{"error": err.Error()})
+			}
+		}()
+	}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -77,6 +125,31 @@ func (s *server) start() error {
 		}()
 	}
 	s.sink.emit("info", "runtime", "netboot_started", map[string]string{"mode": s.cfg.Mode})
+	return nil
+}
+
+func (s *server) openWindowsShare() error {
+	root := filepath.Join(filepath.Dir(s.cfg.Root), "pxe-source")
+	dir, err := osfs.Open(root, osfs.ReadOnly(), osfs.MaxReadFile(8<<20))
+	if err != nil {
+		return fmt.Errorf("open Windows installation source: %w", err)
+	}
+	server := smb.New()
+	server.SetName("NETBOOT")
+	server.RequireSigning = true
+	server.MaxConnections = 16
+	server.MaxInFlightTotal = 32
+	server.AddUser("nbread", s.cfg.SMBPassword)
+	if err := server.Share("install", dir, smb.ReadOnly(), smb.AllowUsers("nbread")); err != nil {
+		_ = dir.Close()
+		return fmt.Errorf("share Windows installation source: %w", err)
+	}
+	ln, err := net.Listen("tcp4", net.JoinHostPort(s.cfg.ListenIP, "445"))
+	if err != nil {
+		_ = dir.Close()
+		return fmt.Errorf("listen SMB: %w", err)
+	}
+	s.smbLn, s.smb, s.windowsFS = ln, server, dir
 	return nil
 }
 
@@ -102,6 +175,10 @@ func (s *server) stop(timeout time.Duration) error {
 		closeErr = s.http.Close()
 	}
 	s.closeListeners()
+	if s.smb != nil {
+		_ = s.smb.Close()
+		_ = s.windowsFS.Close()
+	}
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -119,6 +196,12 @@ func (s *server) stop(timeout time.Duration) error {
 }
 
 func (s *server) closeListeners() {
+	if s.smbLn != nil {
+		_ = s.smbLn.Close()
+	}
+	if s.isoDiskLn != nil {
+		_ = s.isoDiskLn.Close()
+	}
 	if s.httpLn != nil {
 		_ = s.httpLn.Close()
 	}

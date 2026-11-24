@@ -114,7 +114,7 @@ class PxeFileRepository @Inject constructor(@ApplicationContext private val cont
     }
 
     private companion object {
-        val BuiltIns = setOf("ipxe-arm64.efi", "ipxe-x86_64.efi", "undionly.kpxe")
+        val BuiltIns = setOf("ipxe-arm64.efi", "ipxe-x86_64.efi", "snponly-x86_64.efi", "undionly.kpxe")
 
         // Reserved scripts come from configuration; allow deletion of older imported copies.
         val ScriptNames = setOf("autoexec.ipxe", "boot.ipxe")

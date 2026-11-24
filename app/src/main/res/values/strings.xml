@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="pxe_catalog_hint">Import an ISO under Images. Supported ISOs appear in the x64 UEFI PXE menu.</string>
+    <string name="pxe_catalog_preparing">Preparing installation images. Refresh the PXE menu after preparation.</string>
+    <string name="pxe_show_settings">Advanced settings</string>
+    <string name="pxe_hide_settings">Hide advanced settings</string>
+    <string name="log_iso_pxe_prepare_failed">ISO preparation failed</string>
+    <string name="runtime_error_smb_port">Windows installation sharing could not start on TCP port 445. Stop any older NetBoot helper or SMB service and retry.</string>
+    <string name="runtime_error_iso_disk_port">The ISO disk service could not start on TCP port 10809. Stop any older NetBoot helper and retry.</string>
     <string name="local_network_permission_title">Local network access</string>
     <string name="local_network_permission_required">Allow local network access to start PXE.</string>
     <string name="open_app_settings">Open settings</string>
@@ -16,7 +23,7 @@
     <string name="discard_changes">Discard changes?</string>
     <string name="discard_changes_detail">Your script has unsaved changes.</string>
     <string name="remote_file_changed">The remote image changed. Cancel and delete the partial download, then download it again.</string>
-    <string name="app_name">NetBoot</string>
+    <string name="app_name">NetBoot-PXE</string>
     <string name="home">Home</string>
     <string name="images">Images</string>
     <string name="pxe">PXE</string>

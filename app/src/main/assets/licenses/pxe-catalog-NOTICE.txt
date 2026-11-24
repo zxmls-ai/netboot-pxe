@@ -1,0 +1,16 @@
+The following boot utilities are sent to the PXE client. Android does not
+execute them.
+
+iPXE snponly, revision 5e6ea
+https://github.com/ipxe/ipxe/tree/5e6ea
+See ipxe-COPYING.txt for the applicable source notices.
+
+wimboot 2.9.0, GPL-2.0-or-later
+https://github.com/ipxe/wimboot/tree/v2.9.0
+
+BusyBox static (Ubuntu 1:1.36.1-6ubuntu3.1, amd64), GPL-2.0
+https://launchpad.net/ubuntu/+source/busybox/1%3A1.36.1-6ubuntu3.1
+See busybox-NOTICE.txt.
+
+go-filesystems ISO 9660, OSFS and SMB are compiled into the NetBoot Go core.
+The associated BSD licenses accompany this notice.

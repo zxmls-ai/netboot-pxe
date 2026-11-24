@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="pxe_catalog_hint">在「镜像」中导入 ISO，支持的镜像会自动出现在电脑的 x64 UEFI PXE 菜单中。</string>
+    <string name="pxe_catalog_preparing">正在准备安装镜像。完成后可在电脑上刷新 PXE 菜单。</string>
+    <string name="pxe_show_settings">高级设置</string>
+    <string name="pxe_hide_settings">收起高级设置</string>
+    <string name="log_iso_pxe_prepare_failed">PXE 镜像准备失败</string>
+    <string name="runtime_error_smb_port">Windows 安装共享无法使用 TCP 445 端口。请停止旧版 NetBoot 辅助服务或其他 SMB 服务后重试。</string>
+    <string name="runtime_error_iso_disk_port">ISO 网络磁盘无法使用 TCP 10809 端口。请停止旧版 NetBoot 辅助服务后重试。</string>
     <string name="local_network_permission_title">局域网权限</string>
     <string name="local_network_permission_required">启动网络服务需要局域网权限。</string>
     <string name="open_app_settings">前往设置</string>
@@ -16,7 +23,7 @@
     <string name="discard_changes">放弃修改？</string>
     <string name="discard_changes_detail">脚本还有未应用的修改。</string>
     <string name="remote_file_changed">远端镜像已变化。请取消并删除临时文件，然后重新下载。</string>
-    <string name="app_name">系统启动助手</string>
+    <string name="app_name">NetBoot-PXE</string>
     <string name="home">首页</string>
     <string name="images">镜像</string>
     <string name="pxe">PXE</string>

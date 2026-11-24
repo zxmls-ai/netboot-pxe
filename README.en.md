@@ -1,4 +1,4 @@
-# NetBoot
+# NetBoot-PXE
 
 [简体中文](README.md) | English
 
@@ -13,11 +13,13 @@ Download Windows ISOs from Microsoft, import local images, and pause and resume 
 
 ## PXE network boot
 
-1. Open the PXE page and select a network interface. Use **ProxyDHCP** on home networks; use full DHCP only on isolated networks.
-2. Leave the boot file blank to select it automatically for the computer's architecture, or import a boot file and configure the iPXE script.
-3. Start PXE, then select network boot in the computer's boot menu. Stop the service in the app when finished.
+1. Install the APK, grant it root access, and import ISOs under Images.
+2. Connect the phone and PC to the same LAN, open PXE, and tap **Start PXE**. The default ProxyDHCP mode lets the home router assign IP addresses.
+3. Select **UEFI IPv4 network boot** on the PC, then choose an ISO. If the phone is still preparing an image, use **Refresh ISO list** once it finishes. Keep the phone connected and PXE running during installation.
 
-The default menu requires internet access to download installation resources. ISOs on the Images page are not automatically used as PXE installation sources. Restart the service after changing its configuration.
+The local ISO menu supports x64 UEFI computers and recognizes standard Windows Setup, WinPE, Ubuntu Casper, fnOS, and Debian installer layouts. Some WinPE images require a Windows x64 Setup ISO in the library. Preparing Windows Setup requires extra storage for the extracted installation files. The menu marks unsupported layouts. Online boot entries require internet access.
+
+Open **Advanced settings** to specify a boot file, edit the iPXE script, or use full DHCP on an isolated network. Restore the default script to use the automatic ISO menu.
 
 ## Images and USB boot
 
@@ -43,12 +45,12 @@ Windows Setup can discover the drivers automatically, or you can browse the `$Wi
 
 ## Build and release
 
-Use the same toolchain as CI: JDK 25, Android SDK 37, NDK 28.2.13676358, and Go 1.27.1.
+Use the same toolchain as CI: JDK 25, Android SDK 37, NDK 28.2.13676358, and Go 1.27.4.
 The JVM target is 17, and the Gradle version is pinned by the project wrapper.
 
 ```bash
 ./gradlew testDebugUnitTest lintRelease
-./gradlew assembleRelease -PnetbootVersionName=1.0.0
+./gradlew assembleRelease -PnetbootVersionName=1.0.3
 # Only when the emulator ABI is needed
 ./gradlew assembleDebug -PnetbootAbis=arm64-v8a,armeabi-v7a,x86_64
 # Requires a connected, dedicated test device

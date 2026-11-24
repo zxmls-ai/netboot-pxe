@@ -1,0 +1,2 @@
+#!/bin/sh
+/netboot/mount-disk debian || echo "NetBoot: could not prepare network installation media."

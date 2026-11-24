@@ -1,0 +1,11 @@
+#!/bin/sh
+bb=/netboot/busybox
+
+# /proc may not be mounted yet. Casper and fnOS have distinct startup files.
+if [ -f /scripts/casper-premount/ORDER ]; then
+    "$bb" sed -i '1i /netboot/mount-disk casper' /scripts/casper-premount/ORDER
+elif [ -f /trim-install ] && [ -f /usr/sbin/debian-installer-startup ]; then
+    # fnOS starts its own GUI directly, bypassing the Debian startup hooks.
+    "$bb" sed -i '/^[[:space:]]*\/trim-install[[:space:]]*$/i /netboot/mount-disk fnos' /usr/sbin/debian-installer-startup
+fi
+exec /init "$@"

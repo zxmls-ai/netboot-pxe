@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -18,6 +19,7 @@ const (
 
 // scriptNames are served from config.ipxeScript instead of the device root.
 var scriptNames = []string{"autoexec.ipxe", "boot.ipxe"}
+var catalogPassword = regexp.MustCompile("^[a-f0-9]{48}$")
 
 func isScriptName(name string) bool {
 	for _, script := range scriptNames {
@@ -34,6 +36,8 @@ type config struct {
 	Mode         string     `json:"mode"`
 	Root         string     `json:"root"`
 	HTTPPort     int        `json:"httpPort"`
+	ISODiskPort  int        `json:"isoDiskPort"`
+	SMBPassword  string     `json:"smbPassword"`
 	BootFile     string     `json:"bootFile"`
 	IPXEScript   string     `json:"ipxeScript"`
 	MaxTransfers int        `json:"maxTransfers"`
@@ -71,6 +75,12 @@ func parseConfig(raw string) (config, error) {
 	}
 	if cfg.HTTPPort < 1024 || cfg.HTTPPort > 65535 {
 		return cfg, errors.New("httpPort must be between 1024 and 65535")
+	}
+	if cfg.ISODiskPort != 0 && (cfg.ISODiskPort < 1024 || cfg.ISODiskPort > 65535 || cfg.ISODiskPort == cfg.HTTPPort) {
+		return cfg, errors.New("isoDiskPort must be a separate unprivileged TCP port")
+	}
+	if cfg.SMBPassword != "" && !catalogPassword.MatchString(cfg.SMBPassword) {
+		return cfg, errors.New("invalid SMB session credential")
 	}
 	if cfg.Root == "" {
 		return cfg, errors.New("root is required")

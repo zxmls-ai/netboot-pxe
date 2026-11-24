@@ -1,4 +1,4 @@
-# 系统启动助手（NetBoot）
+# NetBoot-PXE
 
 简体中文 | [English](README.en.md)
 
@@ -15,11 +15,13 @@
 
 ## PXE 网络启动
 
-1. 打开「PXE」，选择网络接口。家庭网络使用 **ProxyDHCP**；完整 DHCP 仅用于隔离网络。
-2. 启动文件留空即可按电脑架构自动选择，也可导入文件并配置 iPXE 脚本。
-3. 点击「启动 PXE」，在电脑启动菜单中选择网络启动；用完在应用中停止服务。
+1. 在手机安装 APK 并授予 Root 权限，然后在「镜像」页导入 ISO。[下载 APK](https://github.com/zxmls-ai/netboot-pxe/releases/latest)
+2. 将手机和电脑接入同一局域网。在手机上点「PXE」→「启动 PXE」。家庭网络保留默认的 **ProxyDHCP**。
+3. 电脑选择 **UEFI IPv4 网络启动**，从菜单中选择镜像。镜像准备完成后，可以在电脑上选 **Refresh ISO list** 更新菜单。安装期间保持手机联网和 PXE 运行。
 
-默认菜单需要联网获取安装资源。「镜像」页的 ISO 不会自动作为 PXE 安装源；修改运行配置后需重启服务。
+本地镜像菜单面向 x64 UEFI，可识别标准 Windows 安装盘、WinPE、Ubuntu Casper、fnOS 和 Debian 安装盘布局。部分 WinPE 需要镜像库中另有一个 Windows x64 安装 ISO。首次准备 Windows 安装盘需要额外空间存放解包后的安装文件。
+
+「高级设置」可配置自定义 iPXE 脚本、启动文件和隔离网络的完整 DHCP。使用默认脚本时会生成本地 ISO 菜单。
 
 ## 镜像与 USB 启动盘
 

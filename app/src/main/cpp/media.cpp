@@ -6,11 +6,13 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <algorithm>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <set>
 extern "C" {
@@ -387,6 +389,76 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_sky22333_netboot_data_NativeMedia
         enumerate(udf.get(), "/", entries);
         return windows(entries);
     } catch (const std::exception& e) { fail(env, e.what()); return false; }
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_sky22333_netboot_data_NativeMedia_prepareUdfPxe(
+        JNIEnv* env, jobject, jint input, jstring boot, jstring share, jobject callback) {
+    const char* bootPath = env->GetStringUTFChars(boot, nullptr);
+    if (!bootPath) return nullptr;
+    const char* sharePath = env->GetStringUTFChars(share, nullptr);
+    if (!sharePath) { env->ReleaseStringUTFChars(boot, bootPath); return nullptr; }
+    const char* kind = nullptr;
+    try {
+        require(getuid() != 0, "media_root_not_allowed");
+        auto udf = openUdf(input);
+        if (udf) {
+            std::vector<Entry> entries;
+            enumerate(udf.get(), "/", entries);
+            auto find = [&](const std::string& path) -> const Entry* {
+                for (const auto& e : entries) if (!e.directory && lower(e.path) == path) return &e;
+                return nullptr;
+            };
+            const auto* loader = find("/efi/boot/bootx64.efi");
+            const auto* bcd = find("/efi/microsoft/boot/bcd");
+            if (!bcd) bcd = find("/boot/bcd");
+            const auto* sdi = find("/boot/boot.sdi");
+            if (!sdi) sdi = find("/sources/boot.sdi");
+            const bool installing = find("/setup.exe") &&
+                    (find("/sources/install.wim") || find("/sources/install.esd") || find("/sources/install.swm"));
+            const auto* wim = find("/sources/boot.wim");
+            if (!wim && !installing) {
+                for (const auto& entry : entries) {
+                    const auto name = lower(std::filesystem::path(entry.path).filename().string());
+                    if (!entry.directory && name.size() > 4 && name.substr(name.size()-4) == ".wim" &&
+                            name.rfind("install", 0) != 0) {
+                        if (wim) { wim = nullptr; break; }
+                        wim = &entry;
+                    }
+                }
+            }
+            if (loader && bcd && wim && (!installing || sdi)) {
+                UdfFile bootWim(udfread_file_open(udf.get(), wim->path.c_str()), udfread_file_close);
+                char signature[8]{};
+                require(bootWim && udfread_file_read(bootWim.get(), signature, sizeof(signature)) == sizeof(signature) &&
+                        std::string_view(signature, sizeof(signature)) == std::string_view("MSWIM\0\0\0", 8),
+                        "media_invalid_iso");
+                auto method = env->GetMethodID(env->GetObjectClass(callback), "onProgress", "(IJJ)Z");
+                require(method != nullptr, "media_callback_failed");
+                Progress progress{env, callback, method};
+                auto copy = [&](const Entry* entry, const std::string& target) {
+                    if (!entry) return;
+                    std::filesystem::create_directories(std::filesystem::path(target).parent_path());
+                    Fd fd(open(target.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
+                    copyUdf(udf.get(), *entry, nullptr, fd.value, progress);
+                };
+                progress.begin(0);
+                if (installing) {
+                    for (const auto& entry : entries) {
+                        if (!entry.directory) copy(&entry, std::string(sharePath) + lower(entry.path));
+                    }
+                    kind = "windows";
+                } else {
+                    copy(wim, std::string(bootPath) + "/boot.wim");
+                    copy(bcd, std::string(bootPath) + "/BCD");
+                    copy(sdi, std::string(bootPath) + "/boot.sdi");
+                    kind = "winpe";
+                }
+            }
+        }
+    } catch (const std::exception& e) { fail(env, e.what()); }
+    env->ReleaseStringUTFChars(boot, bootPath);
+    env->ReleaseStringUTFChars(share, sharePath);
+    return kind && !env->ExceptionCheck() ? env->NewStringUTF(kind) : nullptr;
 }
 extern "C" JNIEXPORT void JNICALL Java_com_sky22333_netboot_data_NativeMedia_buildWindows(JNIEnv* env, jobject, jint input, jint output, jstring directory, jobject callback, jobjectArray names, jlongArray sizes) {
     const char* path = env->GetStringUTFChars(directory, nullptr);

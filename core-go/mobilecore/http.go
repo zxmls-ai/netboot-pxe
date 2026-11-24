@@ -25,6 +25,14 @@ func newHTTPServer(cfg config, sink *eventSink) *http.Server {
 	for _, name := range scriptNames {
 		mux.HandleFunc("/"+name, serveScript)
 	}
+	if cfg.SMBPassword != "" {
+		// Clients from the installer kit may already have loaded its old URL.
+		mux.HandleFunc("GET /nbiso/menu.ipxe", func(response http.ResponseWriter, _ *http.Request) {
+			response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			response.Header().Set("Cache-Control", "no-store")
+			_, _ = fmt.Fprintf(response, "#!ipxe\nchain --replace http://%s:%d/iso-menu/menu.ipxe\n", cfg.AdvertiseIP, cfg.HTTPPort)
+		})
+	}
 	mux.HandleFunc("/", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet && request.Method != http.MethodHead {
 			response.WriteHeader(http.StatusMethodNotAllowed)

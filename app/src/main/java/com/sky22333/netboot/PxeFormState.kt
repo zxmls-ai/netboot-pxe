@@ -6,6 +6,7 @@ import com.sky22333.netboot.data.BootProfileEntity
 import com.sky22333.netboot.runtime.DhcpPool
 import com.sky22333.netboot.runtime.DhcpPoolAllocator
 import com.sky22333.netboot.runtime.NetworkAdapter
+import com.sky22333.netboot.runtime.hasLegacyPxeMenu
 
 /** The editable PXE configuration; interface and pool move together in one state transition. */
 data class PxeFormState(
@@ -38,7 +39,7 @@ data class PxeFormState(
                 adapter = selected,
                 mode = BootMode.fromWireValue(profile.mode) ?: BootMode.Proxy,
                 port = profile.httpPort.toString(),
-                bootFile = profile.bootFile,
+                bootFile = if (profile.bootFile == "snponly.efi" && hasLegacyPxeMenu(profile.menuJson)) "" else profile.bootFile,
                 poolStart = profile.dhcpPoolStart,
                 poolEnd = profile.dhcpPoolEnd,
                 script = profile.menuJson.ifBlank { script },
@@ -67,6 +68,7 @@ data class PxeFormState(
         private fun matchingAdapter(adapters: List<NetworkAdapter>, name: String?, address: String?): NetworkAdapter? =
             adapters.firstOrNull { it.name == name && it.address == address }
                 ?: adapters.firstOrNull { it.name == name }
+                ?: adapters.firstOrNull { it.name.startsWith("wlan") || it.name.startsWith("eth") }
                 ?: adapters.firstOrNull()
 
         val Saver = listSaver<PxeFormState, Any>(

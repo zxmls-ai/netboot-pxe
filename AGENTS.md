@@ -10,15 +10,15 @@
 
 ## 1. 项目是什么
 
-系统启动助手（NetBoot）是一个 Android 应用（API 26–37），让**已由 Root 管理器明确授权本应用使用 `su`** 的手机提供：
+NetBoot-PXE 是一个 Android 应用（API 26–37），让**已由 Root 管理器明确授权本应用使用 `su`** 的手机提供：
 
 1. **PXE 网络启动服务** —— 通过手机现有局域网接口，用 DHCP / ProxyDHCP + TFTP + HTTP Boot + iPXE 给同一网络内的 PC 提供网络引导。
 2. **USB 安装介质** —— 把应用私有目录中的镜像临时映射成只读 USB 存储，供 PC 引导。
 3. **镜像获取与管理** —— 微软官方 ISO 临时链接获取、多连接断点下载、本地导入、SHA-256 与状态管理。
 
 USB 数据流：`下载或导入镜像 → 制作或复用介质 → 启用 → 使用 → 停止并恢复 USB`。
-PXE 数据流：`选择接口与模式 → 配置启动文件和脚本 → 启动 → 使用 → 停止`。
-镜像库与 PXE 文件目录独立，下载或导入 ISO 不会自动生成 PXE 安装源。
+PXE 数据流：`导入 ISO → 启动 PXE → 自动准备并生成菜单 → 安装 → 停止`。
+默认脚本启用 ISO 菜单，自定义脚本沿用手动配置。应用进程准备私有目录内的缓存；Root Broker 提供只读 HTTP、NBD 及认证 SMB 服务。
 
 必须做成可发布、可持续维护的正式产品：**不接受 Demo、原型、占位实现、假数据、只覆盖成功
 路径或需要开发者手工收尾的流程。**
@@ -27,7 +27,7 @@ PXE 数据流：`选择接口与模式 → 配置启动文件和脚本 → 启�
 
 | 状态 | 本项目 |
 | --- | --- |
-| **Root 管理器已授权本应用**（授权列表允许 `com.sky22333.netboot` 使用 `su`） | 使用通用 `su`，具体管理器兼容性需实测 |
+| **Root 管理器已授权本应用**（授权列表允许 `io.github.zxmls_ai.netboot.pxe` 使用 `su`） | 使用通用 `su`，具体管理器兼容性需实测 |
 
 应用启动时自动检测现有 Root 和 USB 配置。权限不可用时提示授予本应用 Root 权限，
 **不尝试安装或修补 KernelSU**。
@@ -76,7 +76,7 @@ PXE 数据流：`选择接口与模式 → 配置启动文件和脚本 → 启�
 | CI 构建 JDK | 25 |
 | AGP / Gradle | 9.4.0 / 9.7.1 |
 | NDK（AGP 与 gomobile 共用同一常量） | 28.2.13676358 |
-| Go | 1.27.1 |
+| Go | 1.27.4 |
 | 发布 ABI | `arm64-v8a`、`armeabi-v7a`（`x86_64` 仅供模拟器） |
 
 Android 依赖版本**只在 `gradle/libs.versions.toml` 声明**；Go 依赖由 `core-go/go.mod` 固定，
@@ -143,9 +143,11 @@ ValidateConfig(configJson) -> error
 Start(configJson, listener) -> error
 Stop() -> error
 StatusJSON() -> String
+PrepareISO(imagePath, bootDir, sourceDir, preparation) -> (String, error)
 ```
 
 iPXE 脚本作为 `config.ipxeScript` 随配置传入；修改配置后需重新启动 PXE 才生效。
+ISO 解析和解包在非 Root 应用进程运行；ISO 目录变更时原子发布菜单。SMB 共享仅开放独立安装源目录，要求签名并使用会话凭据。NBD 仅提供只读 ISO。
 
 Android 层仅在 PXE 会话期间持有 `MulticastLock`，启动失败、停止及断连时释放。
 Android 17 起启动前请求并校验 `ACCESS_LOCAL_NETWORK`；拒绝不启动，撤销时停止 PXE。
@@ -256,7 +258,7 @@ USB 清理不依赖 Go 停止成功。强制终止进程或内核异常不保证
 ./gradlew testDebugUnitTest --tests '*UsbGadgetControllerTest'
 
 # Release 构建；CI 用发布 tag 覆盖 versionName
-./gradlew assembleRelease -PnetbootVersionName=1.0.0
+./gradlew assembleRelease -PnetbootVersionName=1.0.3
 
 # 模拟器构建（加入 x86_64；该开关同时驱动 AAR 目标、APK split 与 AAR 校验）
 ./gradlew assembleDebug -PnetbootAbis=arm64-v8a,armeabi-v7a,x86_64
@@ -315,7 +317,7 @@ Go race 需要 CGO 和兼容的本机 C 编译器。Windows 可在当前 PowerSh
 R8 mapping 在构建目录生成，但当前流水线不上传；正式发布前仍须落实下述产物留存要求。
 发布仅允许从 `main` 最新提交进行，tag 必须尚不存在。
 
-CI 通过 `-PnetbootVersionName` 注入去掉前缀 `v` 的 tag；本地默认 `1.0.0`。
+CI 通过 `-PnetbootVersionName` 注入去掉前缀 `v` 的 tag；本地默认 `1.0.3`。
 关于弹窗读取 `BuildConfig.VERSION_NAME`，点击版本号打开项目 GitHub 仓库。
 
 签名 Secrets（仓库 Actions Secrets）：`SIGNING_KEY_BASE64`（完整 `.p12` 的 Base64）、

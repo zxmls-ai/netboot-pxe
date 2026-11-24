@@ -27,12 +27,14 @@ import com.sky22333.netboot.data.BootProfileEntity
 import com.sky22333.netboot.data.RuntimeEventEntity
 import com.sky22333.netboot.data.IsoRepository
 import com.sky22333.netboot.data.IsoState
+import com.sky22333.netboot.data.PxeCatalog
 import com.sky22333.netboot.data.UsbMediaRepository
 import com.sky22333.netboot.data.UsbPreparationStage
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
 import com.sky22333.netboot.root.BrokerException
 import com.sky22333.netboot.root.RootBrokerClient
 import com.sky22333.netboot.root.UsbCapability
@@ -40,6 +42,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -62,6 +65,7 @@ data class RuntimeState(
     val rootAvailable: Boolean? = null,
     val usbCapability: UsbCapability? = null,
     val networkRunning: Boolean = false,
+    val pxeCatalogPreparing: Boolean = false,
     val usbAttached: Boolean = false,
     val usbHostConnected: Boolean = false,
     val activeIsoId: String? = null,
@@ -106,6 +110,7 @@ class RuntimeRepository @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val operationMutex = Mutex()
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var catalogJob: Job? = null
     // Driver imports must not hold up PXE controls.
     private val mediaMutex = Mutex()
     private val eventsSincePrune = AtomicInteger()
@@ -148,23 +153,48 @@ class RuntimeRepository @Inject constructor(
         val adapter = interfaces().firstOrNull { it.name == profile.interfaceName && it.address == profile.listenAddress }
             ?: error("network_interface_changed")
         val root = File(context.filesDir, "pxe").apply { mkdirs() }
+        catalogJob?.cancelAndJoin()
+        val password = if (usesAutomaticPxeCatalog(context, profile.menuJson)) {
+            ByteArray(24).also(SecureRandom()::nextBytes).toHexString()
+        } else ""
+        val catalog = if (password.isNotEmpty()) {
+            PxeCatalog(context, profile.advertiseAddress, password).also { catalog ->
+                withContext(Dispatchers.IO) { catalog.initialize(database.isoDao().all()) }
+            }
+        } else null
         // The lock controls Wi-Fi receive filtering, not interface selection or Wi-Fi power.
         multicastLock = context.getSystemService(WifiManager::class.java)
             ?.createMulticastLock("netboot:pxe")?.apply { setReferenceCounted(false) }
         multicastLock?.acquire()
         try {
-            broker.startNetwork(json.encodeToString(profile.toCoreConfig(mode, root, adapter)))
+            broker.startNetwork(json.encodeToString(profile.toCoreConfig(mode, root, adapter, password)))
         } catch (cancelled: CancellationException) {
             // A cancelled RPC may already have started the server in the broker.
             withContext(NonCancellable) { broker.stopNetwork() }
             throw cancelled
         }
         mutableState.update { it.copy(networkRunning = true) }
+        if (catalog != null) {
+            catalogJob = scope.launch {
+                database.isoDao().observeAll().conflate().collect { assets ->
+                    mutableState.update { it.copy(pxeCatalogPreparing = true) }
+                    try {
+                        catalog.update(assets, ::recordCatalogFailure)
+                    } catch (error: Exception) {
+                        if (error is CancellationException) throw error
+                        recordCatalogFailure("", error.message.orEmpty())
+                    } finally {
+                        mutableState.update { it.copy(pxeCatalogPreparing = false) }
+                    }
+                }
+            }
+        }
     }
 
     suspend fun enforceNetworkPermission() = withOperationLock {
         if (mutableState.value.networkRunning && !context.hasLocalNetworkPermission()) {
             performOperation("stop_network") {
+                catalogJob?.cancelAndJoin()
                 broker.stopNetwork()
                 mutableState.update { it.copy(networkRunning = false, errorCode = "local_network_permission_required") }
             }
@@ -172,6 +202,7 @@ class RuntimeRepository @Inject constructor(
     }
 
     suspend fun stopNetwork() = runOperation("stop_network") {
+        catalogJob?.cancelAndJoin()
         broker.stopNetwork()
         mutableState.update { it.copy(networkRunning = false) }
     }
@@ -235,6 +266,7 @@ class RuntimeRepository @Inject constructor(
     }
 
     suspend fun shutdown() = runOperation("shutdown") {
+        catalogJob?.cancelAndJoin()
         broker.shutdown()
         mutableState.update { it.copy(networkRunning = false, usbAttached = false, usbHostConnected = false, activeIsoId = null, usbRecoveryRequired = false) }
     }
@@ -308,6 +340,7 @@ class RuntimeRepository @Inject constructor(
     }
 
     private fun invalidateDisconnectedSession() {
+        catalogJob?.cancel()
         releaseMulticastLock()
         mutableState.update(RuntimeState::disconnected)
     }
@@ -326,6 +359,8 @@ class RuntimeRepository @Inject constructor(
             message.contains("listen HTTP", ignoreCase = true) -> "http_port_unavailable"
             message.contains("listen TFTP", ignoreCase = true) -> "tftp_port_unavailable"
             message.contains("listen DHCP", ignoreCase = true) -> "dhcp_port_unavailable"
+            message.contains("listen SMB", ignoreCase = true) -> "smb_port_unavailable"
+            message.contains("listen ISO disk", ignoreCase = true) -> "iso_disk_port_unavailable"
             KnownCodes.any { message.startsWith(it, ignoreCase = true) } -> message.substringBefore(':').lowercase()
             brokerCode != null -> brokerCode.substringBefore(':')
             else -> "runtime_failure"
@@ -366,21 +401,37 @@ class RuntimeRepository @Inject constructor(
         database.runtimeEventDao().prune(System.currentTimeMillis() - EventRetentionMillis, MaxStoredEvents)
     }
 
-    private fun BootProfileEntity.toCoreConfig(mode: BootMode, root: File, adapter: NetworkAdapter): CoreConfig {
+    private suspend fun recordCatalogFailure(name: String, detail: String) {
+        insertEvent("error", "media", "iso_pxe_prepare_failed", json.encodeToString(mapOf("image" to name, "detail" to detail)))
+    }
+
+    private fun BootProfileEntity.toCoreConfig(mode: BootMode, root: File, adapter: NetworkAdapter, password: String): CoreConfig {
         val pool = if (mode == BootMode.Dhcp) DhcpPoolAllocator.allocate(
             requestedStart = dhcpPoolStart,
             requestedEnd = dhcpPoolEnd,
             serverAddress = advertiseAddress,
             subnetMask = adapter.subnetMask,
         ) else null
+        val script = if (password.isNotEmpty()) {
+            val base = "http://$advertiseAddress:$httpPort/iso-menu"
+            "#!ipxe\nisset \${netX/ip} || dhcp || goto failed\n" +
+                "iseq \${platform} efi && iseq \${buildarch} x86_64 && goto catalog ||\n" +
+                "chain $base/online.ipxe && exit || goto failed\n" +
+                ":catalog\nchain $base/menu.ipxe && exit ||\n" +
+                ":failed\nprompt NetBoot could not open the boot menu. Press any key to return.\nexit\n"
+        } else {
+            menuJson.takeIf { it.startsWith("#!ipxe") }.orEmpty()
+        }
         return CoreConfig(
             listenIp = listenAddress,
             advertiseIp = advertiseAddress,
             mode = mode.wireValue,
             root = root.canonicalPath,
             httpPort = httpPort,
+            isoDiskPort = if (password.isNotEmpty()) 10809 else 0,
+            smbPassword = password,
             bootFile = bootFile,
-            ipxeScript = menuJson.takeIf { it.startsWith("#!ipxe") }.orEmpty(),
+            ipxeScript = script,
             maxTransfers = 16,
             dhcp = DhcpConfig(
                 poolStart = pool?.start.orEmpty(),
@@ -428,11 +479,23 @@ private data class CoreConfig(
     val mode: String,
     val root: String,
     val httpPort: Int,
+    val isoDiskPort: Int,
+    val smbPassword: String,
     val bootFile: String,
     val ipxeScript: String,
     val maxTransfers: Int,
     val dhcp: DhcpConfig,
 )
+
+internal fun hasLegacyPxeMenu(script: String): Boolean = script.lineSequence().any { line ->
+    line.trimStart().startsWith("chain ") && line.contains("/nbiso/menu.ipxe")
+}
+
+internal fun usesAutomaticPxeCatalog(context: Context, script: String): Boolean {
+    if (script.isBlank() || hasLegacyPxeMenu(script)) return true
+    val defaultMenu = context.assets.open("pxe/autoexec.ipxe").bufferedReader().use { it.readText().trim() }
+    return script.trim() == defaultMenu
+}
 
 @Serializable
 private data class DhcpConfig(

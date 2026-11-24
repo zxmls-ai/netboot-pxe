@@ -29,8 +29,8 @@ val netbootAbis: List<String> = providers.gradleProperty("netbootAbis")
     }
 val emulatorAbis = listOf("x86", "x86_64")
 
-/** CI supplies the release tag; local builds default to 1.0.0. */
-val netbootVersionName: String = providers.gradleProperty("netbootVersionName").getOrElse("1.0.0")
+/** CI supplies the release tag. */
+val netbootVersionName: String = providers.gradleProperty("netbootVersionName").getOrElse("1.0.3")
 
 /** gomobile inverts the x86 family naming: Gradle's `x86_64` is Go's `amd64`. */
 fun gomobileTargetFor(abi: String): String = when (abi) {
@@ -47,10 +47,10 @@ android {
     ndkVersion = pinnedNdkVersion
 
     defaultConfig {
-        applicationId = "com.sky22333.netboot"
+        applicationId = "io.github.zxmls_ai.netboot.pxe"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
+        versionCode = 5
         versionName = netbootVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

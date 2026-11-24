@@ -6,6 +6,7 @@ import android.provider.Settings
 import androidx.core.net.toUri
 import androidx.compose.ui.platform.LocalContext
 import com.sky22333.netboot.runtime.hasLocalNetworkPermission
+import com.sky22333.netboot.runtime.usesAutomaticPxeCatalog
 import android.app.Activity
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
@@ -724,6 +725,8 @@ private fun PxeScreen(
     val context = LocalContext.current
     var permissionMode by rememberSaveable { mutableStateOf<String?>(null) }
     var showPermissionDenied by rememberSaveable { mutableStateOf(false) }
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
+    val automatic = remember(context, form.script) { usesAutomaticPxeCatalog(context, form.script) }
     val adapter = form.adapter?.takeIf { it in adapters }
     val adapterIndex = adapters.indexOf(adapter).coerceAtLeast(0)
     val selectedMode = form.mode
@@ -764,6 +767,26 @@ private fun PxeScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
+            CompactButton(
+                onClick = {
+                    if (runtime.networkRunning) {
+                        viewModel.stopNetwork()
+                    } else if (selectedMode == BootMode.Dhcp) {
+                        pendingMode = BootMode.Dhcp
+                    } else {
+                        launchStart(BootMode.Proxy)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = permissionMode == null && !runtime.busy && (runtime.networkRunning || configurationValid),
+            ) { Text(stringResource(if (runtime.networkRunning) R.string.stop_pxe else R.string.start_pxe)) }
+        }
+        runtime.errorCode?.let { error -> item { HintCard(runtimeErrorText(error), error = true) } }
+        if (automatic) item {
+            val message = if (runtime.pxeCatalogPreparing) R.string.pxe_catalog_preparing else R.string.pxe_catalog_hint
+            Text(stringResource(message), fontSize = 12.sp)
+        }
+        item {
             CompactCard(Modifier.fillMaxWidth(), insideMargin = PaddingValues(0.dp)) {
                 OverlayDropdownPreference(
                     title = stringResource(R.string.network_interface),
@@ -775,87 +798,80 @@ private fun PxeScreen(
             }
         }
         item {
-            SectionTitle(stringResource(R.string.dhcp_mode))
+            CompactButton(onClick = { showAdvanced = !showAdvanced }, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(if (showAdvanced) R.string.pxe_hide_settings else R.string.pxe_show_settings))
+            }
         }
-        item {
-            ActionRow {
-                listOf(BootMode.Proxy to R.string.proxy_dhcp, BootMode.Dhcp to R.string.full_dhcp).forEach { (mode, label) ->
-                    CompactButton(
-                        onClick = { onFormChanged(form.copy(mode = mode)) },
-                        modifier = Modifier.weight(1f).semantics { selected = selectedMode == mode },
-                    ) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(20.dp)) {
-                                if (selectedMode == mode) Icon(Icons.Outlined.Check, null, Modifier.size(20.dp))
+        if (showAdvanced) {
+            item {
+                SectionTitle(stringResource(R.string.dhcp_mode))
+            }
+            item {
+                ActionRow {
+                    listOf(BootMode.Proxy to R.string.proxy_dhcp, BootMode.Dhcp to R.string.full_dhcp).forEach { (mode, label) ->
+                        CompactButton(
+                            onClick = { onFormChanged(form.copy(mode = mode)) },
+                            modifier = Modifier.weight(1f).semantics { selected = selectedMode == mode },
+                        ) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(20.dp)) {
+                                    if (selectedMode == mode) Icon(Icons.Outlined.Check, null, Modifier.size(20.dp))
+                                }
+                                Text(stringResource(label), Modifier.weight(1f))
                             }
-                            Text(stringResource(label), Modifier.weight(1f))
                         }
                     }
                 }
             }
-        }
-        item {
-            TextField(form.port, { onFormChanged(form.copy(port = it.filter(Char::isDigit).take(5))) }, Modifier.fillMaxWidth(), label = stringResource(R.string.http_port), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-        }
-        if (!form.portValid) item { HintCard(stringResource(R.string.http_port_invalid), error = true) }
-        item { TextField(form.bootFile, { onFormChanged(form.copy(bootFile = it)) }, Modifier.fillMaxWidth(), label = stringResource(R.string.boot_file), singleLine = true) }
-        item { Text(stringResource(R.string.boot_file_hint), fontSize = 12.sp) }
-        if (!bootFileValid) item { HintCard(stringResource(R.string.boot_file_not_imported), error = true) }
-        if (selectedMode == BootMode.Dhcp) {
-            item { SectionTitle(stringResource(R.string.dhcp_pool)) }
-            item { TextField(form.poolStart, { onFormChanged(form.copy(poolStart = it.filter { char -> char.isDigit() || char == '.' })) }, Modifier.fillMaxWidth(), label = stringResource(R.string.dhcp_pool_start), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)) }
-            item { TextField(form.poolEnd, { onFormChanged(form.copy(poolEnd = it.filter { char -> char.isDigit() || char == '.' })) }, Modifier.fillMaxWidth(), label = stringResource(R.string.dhcp_pool_end), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)) }
-        }
-        if (selectedMode == BootMode.Dhcp && !form.poolValid) item { HintCard(stringResource(R.string.runtime_error_dhcp_pool), error = true) }
-        item {
-            CompactCard(Modifier.fillMaxWidth(), onClick = onEditScript) {
-                Text(stringResource(R.string.ipxe_script), fontWeight = FontWeight.Medium)
-                Text(form.script.lineSequence().take(3).joinToString("\n"), fontSize = 12.sp)
+            item {
+                TextField(form.port, { onFormChanged(form.copy(port = it.filter(Char::isDigit).take(5))) }, Modifier.fillMaxWidth(), label = stringResource(R.string.http_port), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
             }
-        }
-        if (!form.scriptValid) item { HintCard(stringResource(R.string.invalid_ipxe_script), error = true) }
-        item {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.boot_files), Modifier.weight(1f), fontWeight = FontWeight.Medium, fontSize = 15.sp)
-                CompactIconButton(Icons.Outlined.Add, stringResource(R.string.import_boot_files), { fileLauncher.launch(arrayOf("*/*")) })
+            if (!form.portValid) item { HintCard(stringResource(R.string.http_port_invalid), error = true) }
+            item { TextField(form.bootFile, { onFormChanged(form.copy(bootFile = it)) }, Modifier.fillMaxWidth(), label = stringResource(R.string.boot_file), singleLine = true) }
+            item { Text(stringResource(R.string.boot_file_hint), fontSize = 12.sp) }
+            if (!bootFileValid) item { HintCard(stringResource(R.string.boot_file_not_imported), error = true) }
+            if (selectedMode == BootMode.Dhcp) {
+                item { SectionTitle(stringResource(R.string.dhcp_pool)) }
+                item { TextField(form.poolStart, { onFormChanged(form.copy(poolStart = it.filter { char -> char.isDigit() || char == '.' })) }, Modifier.fillMaxWidth(), label = stringResource(R.string.dhcp_pool_start), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)) }
+                item { TextField(form.poolEnd, { onFormChanged(form.copy(poolEnd = it.filter { char -> char.isDigit() || char == '.' })) }, Modifier.fillMaxWidth(), label = stringResource(R.string.dhcp_pool_end), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)) }
             }
-        }
-        item {
-            CompactCard(Modifier.fillMaxWidth(), insideMargin = PaddingValues(0.dp)) {
-                pxeFiles.forEach { file ->
-                    CompactComponent(
-                        title = file.name,
-                        summary = if (file.builtIn) stringResource(R.string.built_in_file_summary, formatBytes(file.size)) else formatBytes(file.size),
-                        onClick = { onFormChanged(form.copy(bootFile = file.name)) },
-                        endActions = {
-                            if (form.bootFile == file.name) Icon(Icons.Outlined.Check, stringResource(R.string.selected_file), Modifier.size(20.dp), tint = MiuixTheme.colorScheme.primary)
-                            if (!file.builtIn) CompactIconButton(icon = Icons.Outlined.Delete, contentDescription = stringResource(R.string.delete), onClick = { viewModel.deletePxeFile(file.name) })
-                        },
-                    )
+            if (selectedMode == BootMode.Dhcp && !form.poolValid) item { HintCard(stringResource(R.string.runtime_error_dhcp_pool), error = true) }
+            item {
+                CompactCard(Modifier.fillMaxWidth(), onClick = onEditScript) {
+                    Text(stringResource(R.string.ipxe_script), fontWeight = FontWeight.Medium)
+                    Text(form.script.lineSequence().take(3).joinToString("\n"), fontSize = 12.sp)
                 }
             }
-        }
-        item {
-            ActionRow {
-                CompactButton({ adapter?.let { viewModel.saveProfile(selectedMode, it, portValue ?: 0, form.bootFile, form.script, form.poolStart, form.poolEnd) } }, Modifier.weight(1f), enabled = !runtime.busy && configurationValid) { Text(stringResource(R.string.save_configuration)) }
-                CompactButton(
-                    onClick = {
-                        if (runtime.networkRunning) {
-                            viewModel.stopNetwork()
-                        } else if (selectedMode == BootMode.Dhcp) {
-                            // A second address server can disrupt the LAN; require explicit consent.
-                            pendingMode = BootMode.Dhcp
-                        } else {
-                            launchStart(BootMode.Proxy)
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                    enabled = permissionMode == null && !runtime.busy && (runtime.networkRunning || configurationValid),
-                ) { Text(stringResource(if (runtime.networkRunning) R.string.stop_pxe else R.string.start_pxe)) }
+            if (!form.scriptValid) item { HintCard(stringResource(R.string.invalid_ipxe_script), error = true) }
+            item {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.boot_files), Modifier.weight(1f), fontWeight = FontWeight.Medium, fontSize = 15.sp)
+                    CompactIconButton(Icons.Outlined.Add, stringResource(R.string.import_boot_files), { fileLauncher.launch(arrayOf("*/*")) })
+                }
             }
+            item {
+                CompactCard(Modifier.fillMaxWidth(), insideMargin = PaddingValues(0.dp)) {
+                    pxeFiles.forEach { file ->
+                        CompactComponent(
+                            title = file.name,
+                            summary = if (file.builtIn) stringResource(R.string.built_in_file_summary, formatBytes(file.size)) else formatBytes(file.size),
+                            onClick = { onFormChanged(form.copy(bootFile = file.name)) },
+                            endActions = {
+                                if (form.bootFile == file.name) Icon(Icons.Outlined.Check, stringResource(R.string.selected_file), Modifier.size(20.dp), tint = MiuixTheme.colorScheme.primary)
+                                if (!file.builtIn) CompactIconButton(icon = Icons.Outlined.Delete, contentDescription = stringResource(R.string.delete), onClick = { viewModel.deletePxeFile(file.name) })
+                            },
+                        )
+                    }
+                }
+            }
+            item {
+                CompactButton(
+                    { adapter?.let { viewModel.saveProfile(selectedMode, it, portValue ?: 0, form.bootFile, form.script, form.poolStart, form.poolEnd) } },
+                    Modifier.fillMaxWidth(), enabled = !runtime.busy && configurationValid,
+                ) { Text(stringResource(R.string.save_configuration)) }
+            }
+            item { Text(stringResource(R.string.pxe_files_hint), fontSize = 12.sp) }
         }
-        runtime.errorCode?.let { error -> item { HintCard(runtimeErrorText(error), error = true) } }
-        item { Text(stringResource(R.string.pxe_files_hint), fontSize = 12.sp) }
     }
 
     OverlayDialog(
@@ -1033,7 +1049,7 @@ private fun SettingsScreen(viewModel: MainViewModel, padding: PaddingValues) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable(onClickLabel = openRepositoryLabel) {
-                            uriHandler.openUri("https://github.com/sky22333/netboot-android")
+                            uriHandler.openUri("https://github.com/zxmls-ai/netboot-pxe")
                         }
                         .heightIn(min = 48.dp),
                     contentAlignment = Alignment.CenterStart,
@@ -1084,6 +1100,9 @@ private fun logEventTitle(code: String): String = stringResource(
         "netboot_started" -> R.string.log_service_started
         "netboot_stopped" -> R.string.log_service_stopped
         "http_failed" -> R.string.log_service_failed
+        "iso_disk_failed" -> R.string.log_service_failed
+        "smb_failed" -> R.string.log_service_failed
+        "iso_pxe_prepare_failed" -> R.string.log_iso_pxe_prepare_failed
         "dhcp_response" -> R.string.log_dhcp_response
         "boot_file_unsupported" -> R.string.log_dhcp_boot_file_unsupported
         "dhcp_response_failed" -> R.string.log_dhcp_failed
@@ -1274,6 +1293,8 @@ private fun runtimeErrorText(code: String): String = stringResource(
         "local_network_permission_required" -> R.string.local_network_permission_required
         "network_already_running" -> R.string.runtime_error_already_running
         "http_port_unavailable" -> R.string.runtime_error_http_port
+        "smb_port_unavailable" -> R.string.runtime_error_smb_port
+        "iso_disk_port_unavailable" -> R.string.runtime_error_iso_disk_port
         "tftp_port_unavailable" -> R.string.runtime_error_tftp_port
         "dhcp_port_unavailable" -> R.string.runtime_error_dhcp_port
         "usb_restore_failed" -> R.string.runtime_error_usb_restore

@@ -7,11 +7,31 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 type collectingListener struct {
 	events []string
+}
+
+func TestOldISOURLChainsToCurrentCatalog(t *testing.T) {
+	root := t.TempDir()
+	old := filepath.Join(root, "nbiso")
+	if err := os.Mkdir(old, 0700); err != nil {
+		t.Fatal(err)
+	}
+	const placeholder = "#!ipxe\necho Waiting for the old catalog\n"
+	if err := os.WriteFile(filepath.Join(old, "menu.ipxe"), []byte(placeholder), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{Root: root, AdvertiseIP: "192.168.50.1", HTTPPort: 8080, SMBPassword: "automatic"}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/nbiso/menu.ipxe", nil)
+	newHTTPServer(cfg, &eventSink{}).Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "http://192.168.50.1:8080/iso-menu/menu.ipxe") {
+		t.Fatalf("legacy URL did not chain to the app catalog: %d %q", response.Code, response.Body.String())
+	}
 }
 
 func (l *collectingListener) OnEvent(value string) {

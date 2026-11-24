@@ -1,0 +1,81 @@
+#!/bin/sh
+# Run inside the selected ISO's early userspace.
+bb=/netboot/busybox
+for arg in $($bb cat /proc/cmdline); do
+    case "$arg" in
+        nbserver=*) server=${arg#*=} ;;
+        nbexport=*) export_name=${arg#*=} ;;
+        nbmac=*) boot_mac=${arg#*=} ;;
+        nbip=*) boot_ip=${arg#*=} ;;
+        nbmask=*) boot_mask=${arg#*=} ;;
+        nbgateway=*) boot_gateway=${arg#*=} ;;
+    esac
+done
+[ -n "$server" ] && [ -n "$export_name" ] || exit 1
+modprobe nbd || { echo "NetBoot: this kernel cannot load its NBD driver."; exit 1; }
+
+connect() {
+    echo "NetBoot: connecting ISO through $1."
+    "$bb" timeout -s KILL 8 "$bb" nbd-client -b 2048 -t 45 -N "$export_name" "$server" 10809 /dev/nbd0
+}
+
+# A firmware lease can be reused only on the interface that acquired it.
+# Linux can enumerate a different set of devices from UEFI.
+ordered_interfaces() {
+    for path in /sys/class/net/*; do
+        [ -r "$path/address" ] || continue
+        [ "$($bb cat "$path/address")" = "$boot_mac" ] && echo "${path##*/}"
+    done
+    for path in /sys/class/net/*; do
+        dev=${path##*/}
+        [ "$dev" != lo ] && [ -r "$path/address" ] || continue
+        [ "$($bb cat "$path/address")" != "$boot_mac" ] && echo "$dev"
+    done
+}
+
+connected=
+interfaces=$(ordered_interfaces)
+for dev in $interfaces; do
+    "$bb" ip link set "$dev" up
+done
+for dev in $interfaces; do
+    mac=$($bb cat "/sys/class/net/$dev/address")
+    if [ "$mac" = "$boot_mac" ] && [ -n "$boot_ip" ] && [ -n "$boot_mask" ]; then
+        if "$bb" ip addr add "$boot_ip/$boot_mask" dev "$dev"; then
+            if [ -n "$boot_gateway" ] && [ "$boot_gateway" != 0.0.0.0 ]; then
+                "$bb" ip route add default via "$boot_gateway" dev "$dev"
+            fi
+            connect "$dev" && { connected=$dev; break; }
+        fi
+        "$bb" ip addr del "$boot_ip/$boot_mask" dev "$dev" 2>/dev/null
+        "$bb" ip route del default dev "$dev" 2>/dev/null
+    fi
+    if "$bb" udhcpc -q -n -t 3 -T 2 -i "$dev" -s /netboot/dhcp &&
+        connect "$dev"; then
+        connected=$dev
+        break
+    fi
+    "$bb" ip route del default dev "$dev" 2>/dev/null
+done
+if [ -z "$connected" ]; then
+    echo "NetBoot: Linux could not reach $server. Check the wired interface and DHCP lease."
+    exit 1
+fi
+
+echo "NetBoot: attached read-only ISO on /dev/nbd0 via $connected."
+if [ "$1" = fnos ]; then
+    # The GUI mounts its own source at /mnt/cdrom. An existing read-only
+    # ISO9660 superblock conflicts with its first mount attempt.
+    if [ -L /dev/cdrom ] || [ ! -e /dev/cdrom ]; then
+        "$bb" ln -sfn nbd0 /dev/cdrom
+    fi
+elif [ "$1" = debian ]; then
+    "$bb" mkdir -p /cdrom
+    modprobe isofs 2>/dev/null || :
+    "$bb" mount -t iso9660 -o ro /dev/nbd0 /cdrom || exit 1
+    # Some graphical Debian-derived installers also look for a CD-ROM device.
+    if [ ! -e /dev/cdrom ] && [ ! -L /dev/cdrom ]; then
+        "$bb" ln -s nbd0 /dev/cdrom
+    fi
+    echo "NetBoot: mounted /cdrom."
+fi

@@ -468,10 +468,15 @@ func bootFileFor(options map[byte][]byte, cfg config) string {
 	if len(options[175]) > 0 || strings.Contains(strings.ToLower(string(options[77])), "ipxe") {
 		return "http://" + net.JoinHostPort(cfg.AdvertiseIP, strconv.Itoa(cfg.HTTPPort)) + "/boot.ipxe"
 	}
+	architecture := clientArchitecture(options)
+	if cfg.SMBPassword != "" && architecture == "efi64" &&
+		(cfg.BootFile == "" || cfg.BootFile == "snponly.efi" || cfg.BootFile == "ipxe-x86_64.efi") {
+		return "snponly-x86_64.efi"
+	}
 	if cfg.BootFile != "" {
 		return cfg.BootFile
 	}
-	return bundledBootFile(clientArchitecture(options))
+	return bundledBootFile(architecture)
 }
 
 // bundledBootFile returns empty for unsupported architectures.

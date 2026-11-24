@@ -93,6 +93,22 @@ func TestBootFileFollowsClientArchitecture(t *testing.T) {
 	}
 }
 
+func TestAutomaticISOUsesSNPForOldProfiles(t *testing.T) {
+	cfg := testDHCPConfig(ModeProxy)
+	cfg.SMBPassword = "automatic"
+	for _, file := range []string{"", "snponly.efi", "ipxe-x86_64.efi", "custom.efi"} {
+		cfg.BootFile = file
+		request := dhcpRequest(1, 7, true)
+		want := "snponly-x86_64.efi"
+		if file == "custom.efi" {
+			want = file
+		}
+		if got := bootFileFor(parseDHCPOptions(request[240:]), cfg); got != want {
+			t.Errorf("boot file %q selected %q, want %q", file, got, want)
+		}
+	}
+}
+
 func TestBootFileIsEmptyWithoutABundledImage(t *testing.T) {
 	cfg := testDHCPConfig(ModeProxy)
 	cfg.BootFile = ""
