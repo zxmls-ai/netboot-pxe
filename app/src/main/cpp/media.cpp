@@ -460,6 +460,27 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_sky22333_netboot_data_NativeMedia_
     env->ReleaseStringUTFChars(share, sharePath);
     return kind && !env->ExceptionCheck() ? env->NewStringUTF(kind) : nullptr;
 }
+extern "C" JNIEXPORT void JNICALL Java_com_sky22333_netboot_data_NativeMedia_packPxeDrivers(JNIEnv* env, jobject, jstring directory, jint output, jobject callback) {
+    const char* path = env->GetStringUTFChars(directory, nullptr);
+    if (!path) return;
+    try {
+        require(getuid() != 0, "media_root_forbidden");
+        struct stat status {};
+        require(fstat(output, &status) == 0 && S_ISREG(status.st_mode), "media_write_failed");
+        auto method = env->GetMethodID(env->GetObjectClass(callback), "onProgress", "(IJJ)Z");
+        require(method != nullptr, "media_callback_failed");
+        Progress progress{env, callback, method};
+        checkWim(wimlib_global_init(0));
+        WIMStruct* raw = nullptr;
+        checkWim(wimlib_create_new_wim(WIMLIB_COMPRESSION_TYPE_XPRESS, &raw));
+        std::unique_ptr<WIMStruct, decltype(&wimlib_free)> wim(raw, wimlib_free);
+        wimlib_register_progress_function(wim.get(), wimProgress, &progress);
+        checkWim(wimlib_add_image(wim.get(), path, "NetBoot Drivers", nullptr, WIMLIB_ADD_FLAG_NO_ACLS));
+        checkWim(wimlib_write_to_fd(wim.get(), output, WIMLIB_ALL_IMAGES, 0, 2));
+    } catch (const std::exception& e) { fail(env, e.what()); }
+    env->ReleaseStringUTFChars(directory, path);
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_sky22333_netboot_data_NativeMedia_buildWindows(JNIEnv* env, jobject, jint input, jint output, jstring directory, jobject callback, jobjectArray names, jlongArray sizes) {
     const char* path = env->GetStringUTFChars(directory, nullptr);
     if (!path) return;

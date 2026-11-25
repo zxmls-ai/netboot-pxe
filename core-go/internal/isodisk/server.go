@@ -31,6 +31,8 @@ const (
 	errUnknown            = 0x80000006
 	readOnly       uint16 = 3 // NBD_FLAG_HAS_FLAGS | NBD_FLAG_READ_ONLY
 	maxRead               = 8 << 20
+	// Keep the ISO signatures out of the raw NBD device's probe offsets.
+	loopOffset = 1 << 20
 )
 
 var exportName = regexp.MustCompile("^[a-f0-9]{32}$")
@@ -39,6 +41,26 @@ var imageName = regexp.MustCompile(`^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}\.
 type exportCatalog struct {
 	items  string
 	images string
+}
+
+type isoExport struct {
+	file   *os.File
+	size   uint64
+	offset uint64
+}
+
+func (e isoExport) readAt(dst []byte, offset uint64) error {
+	if offset < e.offset {
+		padding := min(uint64(len(dst)), e.offset-offset)
+		clear(dst[:padding])
+		dst = dst[padding:]
+		offset += padding
+	}
+	if len(dst) == 0 {
+		return nil
+	}
+	_, err := e.file.ReadAt(dst, int64(offset-e.offset))
+	return err
 }
 
 // Serve owns the listener and all accepted connections. The catalog root
@@ -79,7 +101,17 @@ func Serve(ctx context.Context, ln net.Listener, items, images string, limit int
 	}
 }
 
-func openExport(catalog exportCatalog, name []byte) (*os.File, uint64) {
+func openExport(catalog exportCatalog, name []byte) isoExport {
+	name, loop := bytes.CutSuffix(name, []byte("-loop"))
+	file, size := openCatalogISO(catalog, name)
+	var offset uint64
+	if file != nil && loop {
+		offset = loopOffset
+	}
+	return isoExport{file: file, size: size + offset, offset: offset}
+}
+
+func openCatalogISO(catalog exportCatalog, name []byte) (*os.File, uint64) {
 	if !exportName.Match(name) {
 		return nil, 0
 	}
@@ -182,27 +214,27 @@ func serveConn(conn net.Conn, catalog exportCatalog) {
 			_ = optionResult(conn, option.Type, replyAck, nil)
 			return
 		case optExportName:
-			file, size := openExport(catalog, payload)
-			if file == nil {
+			export := openExport(catalog, payload)
+			if export.file == nil {
 				return
 			}
-			defer file.Close()
+			defer export.file.Close()
 			var padding []byte
 			if flags&2 == 0 {
 				padding = make([]byte, 124)
 			}
-			if send(conn, size, readOnly, padding) == nil {
-				transmit(conn, file, size)
+			if send(conn, export.size, readOnly, padding) == nil {
+				transmit(conn, export)
 			}
 			return
 		case optInfo, optGo:
-			file, size, err := describe(conn, catalog, option.Type, payload)
+			export, err := describe(conn, catalog, option.Type, payload)
 			if err != nil {
 				return
 			}
-			if file != nil {
-				defer file.Close()
-				transmit(conn, file, size)
+			if export.file != nil {
+				defer export.file.Close()
+				transmit(conn, export)
 				return
 			}
 		default:
@@ -213,25 +245,25 @@ func serveConn(conn net.Conn, catalog exportCatalog) {
 	}
 }
 
-func describe(conn net.Conn, catalog exportCatalog, option uint32, payload []byte) (*os.File, uint64, error) {
+func describe(conn net.Conn, catalog exportCatalog, option uint32, payload []byte) (isoExport, error) {
 	if len(payload) < 6 {
-		return nil, 0, optionResult(conn, option, errInvalid, nil)
+		return isoExport{}, optionResult(conn, option, errInvalid, nil)
 	}
 	length := binary.BigEndian.Uint32(payload)
 	if length > uint32(len(payload)-6) {
-		return nil, 0, optionResult(conn, option, errInvalid, nil)
+		return isoExport{}, optionResult(conn, option, errInvalid, nil)
 	}
 	rest := payload[4+length:]
 	count := int(binary.BigEndian.Uint16(rest))
 	if len(rest) != 2+2*count {
-		return nil, 0, optionResult(conn, option, errInvalid, nil)
+		return isoExport{}, optionResult(conn, option, errInvalid, nil)
 	}
-	file, size := openExport(catalog, payload[4:4+length])
-	if file == nil {
-		return nil, 0, optionResult(conn, option, errUnknown, nil)
+	disk := openExport(catalog, payload[4:4+length])
+	if disk.file == nil {
+		return isoExport{}, optionResult(conn, option, errUnknown, nil)
 	}
 	var export [12]byte // NBD_INFO_EXPORT
-	binary.BigEndian.PutUint64(export[2:], size)
+	binary.BigEndian.PutUint64(export[2:], disk.size)
 	binary.BigEndian.PutUint16(export[10:], readOnly)
 	err := optionResult(conn, option, replyInfo, export[:])
 	// ISO9660 requires the client to use logical sectors of at most 2048 bytes.
@@ -247,13 +279,13 @@ func describe(conn net.Conn, catalog exportCatalog, option uint32, payload []byt
 		err = optionResult(conn, option, replyAck, nil)
 	}
 	if err != nil || option == optInfo {
-		_ = file.Close()
-		return nil, 0, err
+		_ = disk.file.Close()
+		return isoExport{}, err
 	}
-	return file, size, nil
+	return disk, nil
 }
 
-func transmit(conn net.Conn, file *os.File, size uint64) {
+func transmit(conn net.Conn, export isoExport) {
 	// Installers can remain idle at a confirmation screen. Cancellation still
 	// closes the connection immediately when PXE stops.
 	_ = conn.SetDeadline(time.Time{})
@@ -285,14 +317,14 @@ func transmit(conn net.Conn, file *os.File, size uint64) {
 			}
 			status = 30
 		case req.Type != 0 || req.Flags != 0 || req.Length > maxRead ||
-			req.Offset > size || uint64(req.Length) > size-req.Offset:
+			req.Offset > export.size || uint64(req.Length) > export.size-req.Offset:
 			status = 22
 		default:
 			if cap(data) < int(req.Length) {
 				data = make([]byte, req.Length)
 			}
 			data = data[:req.Length]
-			if _, err := file.ReadAt(data, int64(req.Offset)); err != nil {
+			if err := export.readAt(data, req.Offset); err != nil {
 				status = 5
 			}
 		}

@@ -210,7 +210,7 @@
     <string name="log_export_failed">无法写入日志文件</string>
     <string name="empty_source">所选文件为空，请重新选择。</string>
     <string name="usb_drivers">携带驱动</string>
-    <string name="usb_drivers_detail">添加完整驱动包，供 Windows 安装程序自动发现，也可手动从 $WinPEDriver$ 文件夹加载。</string>
+    <string name="usb_drivers_detail">添加完整 Windows 驱动包。PXE 安装时会先加载驱动，再连接安装源。USB 启动时，驱动保存在 $WinPEDriver$ 文件夹。</string>
     <string name="usb_drivers_empty">未添加驱动</string>
     <string name="usb_drivers_zip">选择驱动 ZIP</string>
     <string name="usb_drivers_folder">选择驱动文件夹</string>

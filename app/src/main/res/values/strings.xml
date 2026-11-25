@@ -211,7 +211,7 @@
     <string name="log_export_failed">The log file could not be written</string>
     <string name="empty_source">The selected file is empty. Choose another file.</string>
     <string name="usb_drivers">Include drivers</string>
-    <string name="usb_drivers_detail">Add a complete driver package for Windows Setup to discover, or load it manually from the $WinPEDriver$ folder.</string>
+    <string name="usb_drivers_detail">Add a complete Windows driver package. For PXE installation, WinPE loads it before connecting to the installation source. For USB boot, the files appear in the $WinPEDriver$ folder.</string>
     <string name="usb_drivers_empty">No drivers added</string>
     <string name="usb_drivers_zip">Choose driver ZIP</string>
     <string name="usb_drivers_folder">Choose driver folder</string>

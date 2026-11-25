@@ -158,7 +158,7 @@ class RuntimeRepository @Inject constructor(
             ByteArray(24).also(SecureRandom()::nextBytes).toHexString()
         } else ""
         val catalog = if (password.isNotEmpty()) {
-            PxeCatalog(context, profile.advertiseAddress, password).also { catalog ->
+            PxeCatalog(context, profile.advertiseAddress, password, drivers).also { catalog ->
                 withContext(Dispatchers.IO) { catalog.initialize(database.isoDao().all()) }
             }
         } else null

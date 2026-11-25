@@ -100,9 +100,7 @@ class DriverRepository @Inject constructor(
 
     fun files(asset: IsoAssetEntity): List<File> {
         if (asset.driverHash.isEmpty()) return emptyList()
-        if (!asset.driverHash.matches(Regex("[a-f0-9]{64}"))) throw IOException("drivers_invalid")
-        val directory = File(root, "${asset.id}/${asset.driverHash}")
-        if (!directory.isDirectory || Files.isSymbolicLink(directory.toPath())) throw IOException("drivers_missing")
+        val directory = packageDirectory(asset)
         val files = directory.walkTopDown().onEnter {
             if (Files.isSymbolicLink(it.toPath())) throw IOException("drivers_invalid")
             true
@@ -110,6 +108,13 @@ class DriverRepository @Inject constructor(
         if (files.isEmpty()) throw IOException("drivers_missing")
         files.forEach { if (!it.isFile || Files.isSymbolicLink(it.toPath())) throw IOException("drivers_invalid") }
         return files.sortedBy { it.relativeTo(directory).invariantSeparatorsPath }
+    }
+
+    internal fun packageDirectory(asset: IsoAssetEntity): File {
+        if (!asset.driverHash.matches(Regex("[a-f0-9]{64}"))) throw IOException("drivers_invalid")
+        val directory = File(root, "${asset.id}/${asset.driverHash}")
+        if (!directory.isDirectory || Files.isSymbolicLink(directory.toPath())) throw IOException("drivers_missing")
+        return directory
     }
 
     fun relativePath(asset: IsoAssetEntity, file: File): String =

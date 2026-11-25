@@ -89,5 +89,6 @@ internal object NativeMedia {
     external fun volumeLabel(input: Int): String?
     external fun isWindows(input: Int): Boolean
     external fun prepareUdfPxe(input: Int, bootDirectory: String, shareDirectory: String, progress: MediaProgress): String?
+    external fun packPxeDrivers(inputDirectory: String, output: Int, progress: MediaProgress)
     external fun buildWindows(input: Int, output: Int, directory: String, progress: MediaProgress, driverPaths: Array<String> = emptyArray(), driverSizes: LongArray = longArrayOf())
 }

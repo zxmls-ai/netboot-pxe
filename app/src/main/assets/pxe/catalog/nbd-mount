@@ -14,9 +14,43 @@ done
 [ -n "$server" ] && [ -n "$export_name" ] || exit 1
 modprobe nbd || { echo "NetBoot: this kernel cannot load its NBD driver."; exit 1; }
 
+# BusyBox returns when its daemon forks. Linux publishes the device capacity
+# later, in NBD_DO_IT. A loop created before that keeps its zero capacity.
+wait_for_casper_disk() {
+    for attempt in $("$bb" seq 30); do
+        if read -r nbd_sectors </sys/class/block/nbd0/size &&
+            [ "$nbd_sectors" -gt "$((loop_offset / 512 + 64))" ]; then
+            return 0
+        fi
+        "$bb" sleep 0.1
+    done
+    return 1
+}
+
 connect() {
     echo "NetBoot: connecting ISO through $1."
-    "$bb" timeout -s KILL 8 "$bb" nbd-client -b 2048 -t 45 -N "$export_name" "$server" 10809 /dev/nbd0
+    "$bb" timeout -s KILL 10 "$bb" nbd-client -b 2048 -t 45 -N "$export_name" "$server" 10809 /dev/nbd0 || return 1
+    [ "$mode" != casper ] && return 0
+    export_reached=1
+    if ! wait_for_casper_disk; then
+        echo "NetBoot: the NBD session opened, but the kernel did not publish the ISO capacity."
+        "$bb" nbd-client -d /dev/nbd0
+        return 1
+    fi
+    # Mount the known ISO explicitly. Casper binds this directory to /cdrom.
+    # Probing the raw NBD device would expose the installation media as a disk.
+    if media=$(losetup --find --show --read-only --offset "$loop_offset" /dev/nbd0); then
+        if read -r loop_sectors <"/sys/class/block/${media##*/}/size" &&
+            [ "$loop_sectors" -eq "$((nbd_sectors - loop_offset / 512))" ] &&
+            "$bb" mount -t iso9660 -o ro "$media" /run/netboot/casper; then
+            echo "NetBoot: mounted the read-only Casper ISO."
+            return 0
+        fi
+        losetup -d "$media"
+    fi
+    echo "NetBoot: could not mount the Casper ISO on the read-only loop device."
+    "$bb" nbd-client -d /dev/nbd0
+    return 1
 }
 
 # A firmware lease can be reused only on the interface that acquired it.
@@ -33,37 +67,70 @@ ordered_interfaces() {
     done
 }
 
-connected=
-interfaces=$(ordered_interfaces)
-for dev in $interfaces; do
-    "$bb" ip link set "$dev" up
-done
-for dev in $interfaces; do
+try_interface() {
+    dev=$1
     mac=$($bb cat "/sys/class/net/$dev/address")
     if [ "$mac" = "$boot_mac" ] && [ -n "$boot_ip" ] && [ -n "$boot_mask" ]; then
         if "$bb" ip addr add "$boot_ip/$boot_mask" dev "$dev"; then
             if [ -n "$boot_gateway" ] && [ "$boot_gateway" != 0.0.0.0 ]; then
                 "$bb" ip route add default via "$boot_gateway" dev "$dev"
             fi
-            connect "$dev" && { connected=$dev; break; }
+            connect "$dev" && return 0
         fi
         "$bb" ip addr del "$boot_ip/$boot_mask" dev "$dev" 2>/dev/null
         "$bb" ip route del default dev "$dev" 2>/dev/null
     fi
     if "$bb" udhcpc -q -n -t 3 -T 2 -i "$dev" -s /netboot/dhcp &&
         connect "$dev"; then
-        connected=$dev
-        break
+        return 0
     fi
     "$bb" ip route del default dev "$dev" 2>/dev/null
+    return 1
+}
+
+mode=$1
+rounds=1
+if [ "$mode" = casper ]; then
+    loop_offset=1048576
+    modprobe loop || { echo "NetBoot: this kernel cannot load its loop driver."; exit 1; }
+    modprobe isofs || { echo "NetBoot: this kernel cannot load ISO9660."; exit 1; }
+    modprobe af_packet 2>/dev/null || :
+    "$bb" mkdir -p /run/netboot/casper || exit 1
+    rounds=3
+fi
+connected=
+for round in $("$bb" seq "$rounds"); do
+    if [ "$mode" = casper ]; then udevadm settle --timeout=5 || :; fi
+    interfaces=$(ordered_interfaces)
+    for dev in $interfaces; do
+        "$bb" ip link set "$dev" up
+    done
+    if [ "$mode" = casper ]; then
+        for second in 1 2 3 4 5; do
+            ready=
+            for dev in $interfaces; do
+                [ "$("$bb" cat "/sys/class/net/$dev/carrier" 2>/dev/null)" = 1 ] && ready=1
+            done
+            [ -n "$ready" ] && break
+            "$bb" sleep 1
+        done
+    fi
+    for dev in $interfaces; do
+        if [ "$mode" = casper ] && [ "$("$bb" cat "/sys/class/net/$dev/carrier" 2>/dev/null)" != 1 ]; then continue; fi
+        try_interface "$dev" && { connected=$dev; break 2; }
+    done
 done
 if [ -z "$connected" ]; then
-    echo "NetBoot: Linux could not reach $server. Check the wired interface and DHCP lease."
+    if [ -n "$export_reached" ]; then
+        echo "NetBoot: reached $server, but Linux could not read the Ubuntu ISO."
+    else
+        echo "NetBoot: Linux could not open an NBD session to $server. Check the wired interface and DHCP lease."
+    fi
     exit 1
 fi
 
 echo "NetBoot: attached read-only ISO on /dev/nbd0 via $connected."
-if [ "$1" = fnos ]; then
+if [ "$mode" = fnos ]; then
     # The GUI mounts its own source at /mnt/cdrom. An existing read-only
     # ISO9660 superblock conflicts with its first mount attempt.
     if [ -L /dev/cdrom ] || [ ! -e /dev/cdrom ]; then

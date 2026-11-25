@@ -16,6 +16,7 @@ internal class PxeCatalog(
     private val context: Context,
     private val address: String,
     private val password: String,
+    private val drivers: DriverRepository,
 ) {
     private val files = context.filesDir
     private val root = File(files, "pxe/iso-menu")
@@ -44,14 +45,14 @@ internal class PxeCatalog(
         publishText(File(root, "connect.cmd"), connectionScript())
         publishText(File(share, "netboot-source.txt"), "NetBoot Windows installation media\n")
         publish(assets.mapNotNull { asset ->
-            exportId(asset)?.let { Entry(it, menuLabel(asset.fileName), cachedKind(it) ?: "pending") }
+            exportId(asset)?.let { catalogEntry(asset, it) }
         }.distinctBy { it.id })
     }
 
     suspend fun update(assets: List<IsoAssetEntity>, failed: suspend (String, String) -> Unit) {
         val candidates = assets.mapNotNull { asset -> exportId(asset)?.let { it to asset } }.distinctBy { it.first }
         val entries = candidates.map { (id, asset) ->
-            Entry(id, menuLabel(asset.fileName), cachedKind(id) ?: "pending")
+            catalogEntry(asset, id)
         }.toMutableList()
         publish(entries)
         for ((index, candidate) in candidates.withIndex()) {
@@ -59,15 +60,45 @@ internal class PxeCatalog(
             val (id, asset) = candidate
             currentCoroutineContext().ensureActive()
             val kind = try {
-                prepare(asset, id)
+                val kind = cachedKind(id) ?: prepare(asset, id)
+                val payload = driverPayload(asset, kind)
+                if (payload != null && !File(items, "$id/$payload").isFile) packDrivers(asset, id, payload)
+                kind
             } catch (error: Exception) {
                 currentCoroutineContext().ensureActive()
                 if (error is kotlinx.coroutines.CancellationException) throw error
                 failed(asset.fileName, error.message.orEmpty())
                 "failed"
             }
-            entries[index] = entries[index].copy(kind = kind)
+            entries[index] = entries[index].copy(kind = kind, drivers = driverPayload(asset, kind))
             publish(entries)
+        }
+    }
+
+    private fun driverPayload(asset: IsoAssetEntity, kind: String): String? =
+        if (kind == "windows" && Hash.matches(asset.driverHash)) "drivers-${asset.driverHash}.wim" else null
+
+    private fun catalogEntry(asset: IsoAssetEntity, id: String): Entry {
+        val kind = cachedKind(id) ?: "pending"
+        val payload = driverPayload(asset, kind)
+        val ready = payload == null || File(items, "$id/$payload").isFile
+        return Entry(id, menuLabel(asset.fileName), if (ready) kind else "pending", payload)
+    }
+
+    private suspend fun packDrivers(asset: IsoAssetEntity, id: String, payload: String) {
+        drivers.files(asset) // Verify the imported package contains only regular files.
+        val scope = currentCoroutineContext()
+        val work = Files.createTempFile(staging.toPath(), "drivers-", ".wim").toFile()
+        try {
+            ParcelFileDescriptor.open(work, ParcelFileDescriptor.MODE_READ_WRITE).use { output ->
+                NativeMedia.packPxeDrivers(drivers.packageDirectory(asset).path, output.fd, object : MediaProgress {
+                    override fun onProgress(stage: Int, done: Long, total: Long) = scope.isActive
+                })
+            }
+            scope.ensureActive()
+            Files.move(work.toPath(), File(items, "$id/$payload").toPath(), StandardCopyOption.ATOMIC_MOVE)
+        } finally {
+            work.delete()
         }
     }
 
@@ -144,7 +175,7 @@ internal class PxeCatalog(
         }
         for (entry in entries) {
             val text = when (entry.kind) {
-                "windows" -> windowsScript(entry.id, donor, installing = true)
+                "windows" -> windowsScript(entry.id, donor, installing = true, drivers = entry.drivers)
                 "winpe" -> if (canBootPE(entry.id, donor)) windowsScript(entry.id, donor, installing = false) else null
                 "casper", "fnos", "debian" -> linuxScript(entry)
                 else -> null
@@ -189,7 +220,7 @@ internal class PxeCatalog(
     private fun canBootPE(id: String, donor: String?): Boolean =
         donor != null || File(items, "$id/boot.sdi").isFile
 
-    private fun windowsScript(id: String, donor: String?, installing: Boolean): String = buildString {
+    private fun windowsScript(id: String, donor: String?, installing: Boolean, drivers: String? = null): String = buildString {
         appendLine("#!ipxe")
         appendLine("kernel ../../wimboot || exit 1")
         val bootFiles = if (installing || donor == null) "." else "../$donor"
@@ -201,6 +232,7 @@ internal class PxeCatalog(
             for ((name, source) in listOf("winpeshl.ini" to "winpeshl.ini", "netsetup.cmd" to "netsetup.cmd", "connect.cmd" to "../../connect.cmd")) {
                 appendLine("initrd --name $name $source $name || exit 1")
             }
+            if (drivers != null) appendLine("initrd --name $DriverArchive $drivers $DriverArchive || exit 1")
         } else if (donor != null) {
             appendLine("initrd --name bootmgfw.efi $bootFiles/bootmgfw.efi bootmgfw.efi || exit 1")
         }
@@ -211,7 +243,9 @@ internal class PxeCatalog(
     private fun installLaunchFiles(id: String) {
         publishText(File(items, "$id/winpeshl.ini"), "[LaunchApps]\r\n%SYSTEMROOT%\\System32\\cmd.exe, /k %SYSTEMROOT%\\System32\\netsetup.cmd\r\n")
         val lines = listOf(
-            "@echo off", "wpeinit", ":connect", "call %SystemRoot%\\System32\\connect.cmd",
+            "@echo off", "wpeinit",
+            "if exist %SystemRoot%\\System32\\$DriverArchive call :load_drivers",
+            ":connect", "call %SystemRoot%\\System32\\connect.cmd",
             "if errorlevel 1 goto retry", "set media=Z:\\$id",
             "echo Installation source connected. Opening Windows Setup...",
             "if not exist \"%SystemDrive%\\sources\\setup.exe\" goto fromshare",
@@ -219,22 +253,34 @@ internal class PxeCatalog(
             "start \"\" /wait \"%SystemDrive%\\sources\\setup.exe\" \"/InstallFrom:%media%\\sources\\install.wim\"",
             "exit /b %errorlevel%", ":fromshare", "start \"\" /wait \"%media%\\setup.exe\"",
             "exit /b %errorlevel%", ":retry", "echo Windows installation source is unavailable.", "pause", "goto connect",
+            ":load_drivers", "echo Loading imported WinPE drivers...",
+            "md %SystemDrive%\\NetBootDrivers",
+            "copy /b \"%SystemRoot%\\System32\\$DriverArchive\" \"%TEMP%\\nbdrivers.wim\" >nul",
+            "if errorlevel 1 exit /b 1",
+            "dism /Apply-Image /ImageFile:\"%TEMP%\\nbdrivers.wim\" /Index:1 /ApplyDir:%SystemDrive%\\NetBootDrivers /NoRpFix",
+            "if errorlevel 1 exit /b 1",
+            "for /r %SystemDrive%\\NetBootDrivers %%f in (*.inf) do drvload \"%%f\"",
+            "exit /b 0",
         )
         publishText(File(items, "$id/netsetup.cmd"), lines.joinToString("\r\n", postfix = "\r\n"))
     }
 
     private fun connectionScript(): String = listOf(
         "@echo off", "setlocal", "wpeutil InitializeNetwork", "net start LanmanWorkstation >nul 2>&1",
+        "echo Waiting for the WinPE network and installation source...",
         "set attempts=0", ":connect", "if exist Z:\\netboot-source.txt exit /b 0",
         "net use Z: \\\\$address\\install /user:NETBOOT\\nbread $password /persistent:no >\"%TEMP%\\nbsource.log\" 2>&1",
-        "if not errorlevel 1 exit /b 0", "set /a attempts+=1 >nul",
-        "if %attempts% GEQ 40 goto report", "ping -n 4 127.0.0.1 >nul", "goto connect",
-        ":report", "type \"%TEMP%\\nbsource.log\"", "ipconfig", "exit /b 1",
+        "if exist Z:\\netboot-source.txt exit /b 0", "set /a attempts+=1 >nul",
+        "if %attempts% GEQ 40 goto report",
+        "if %attempts% EQU 5 call :refresh_network", "if %attempts% EQU 20 call :refresh_network",
+        "ping -n 4 127.0.0.1 >nul", "goto connect",
+        ":refresh_network", "wpeutil InitializeNetwork /NoWait", "net start LanmanWorkstation >nul 2>&1", "exit /b 0",
+        ":report", "type \"%TEMP%\\nbsource.log\"", "ipconfig /all", "exit /b 1",
     ).joinToString("\r\n", postfix = "\r\n")
 
     private fun linuxScript(entry: Entry): String {
         val boot = when (entry.kind) {
-            "casper" -> "rdinit=/netboot/init boot=casper live-media=/dev/nbd0"
+            "casper" -> "rdinit=/netboot/init boot=casper live-media=/run/netboot/casper"
             "fnos" -> "rdinit=/netboot/init priority=high"
             else -> "priority=high"
         }
@@ -243,9 +289,10 @@ internal class PxeCatalog(
         } else {
             "nbd-init /netboot/init"
         }
+        val nbdExport = if (entry.kind == "casper") "${entry.id}-loop" else entry.id
         return """
             #!ipxe
-            kernel vmlinuz initrd=initrd.magic $boot nbserver=$address nbexport=${entry.id} nbmac=${D}{netX/mac} nbip=${D}{netX/ip} nbmask=${D}{netX/netmask} nbgateway=${D}{netX/gateway} --- || exit 1
+            kernel vmlinuz initrd=initrd.magic $boot nbserver=$address nbexport=$nbdExport nbmac=${D}{netX/mac} nbip=${D}{netX/ip} nbmask=${D}{netX/netmask} nbgateway=${D}{netX/gateway} --- || exit 1
             initrd initrd || exit 1
             initrd ../../nbd-busybox /netboot/busybox mkdir=1 mode=755 || exit 1
             initrd ../../nbd-mount /netboot/mount-disk mode=755 || exit 1
@@ -272,10 +319,12 @@ internal class PxeCatalog(
         if (c.isLetterOrDigit() || c in " ._()+-") c else '_'
     }.joinToString("").take(105)
 
-    private data class Entry(val id: String, val label: String, val kind: String)
+    private data class Entry(val id: String, val label: String, val kind: String, val drivers: String? = null)
 
     private companion object {
         const val D = '$'
+        // wimboot only injects data files whose virtual names do not end in .wim.
+        const val DriverArchive = "nbdrivers.bin"
         val Hash = Regex("[0-9a-f]{64}")
         val LinuxKinds = setOf("casper", "fnos", "debian")
         val BootAssets = listOf("wimboot", "nbd-busybox", "nbd-mount", "nbd-init", "nbd-dhcp", "nbd-debian")

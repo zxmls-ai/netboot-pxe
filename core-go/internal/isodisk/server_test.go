@@ -30,6 +30,28 @@ func TestNamedISO(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Run("loop export pads the ISO without changing its contents", func(t *testing.T) {
+		export := openExport(exportCatalog{items: root, images: images}, []byte(name+"-loop"))
+		if export.file == nil {
+			t.Fatal("loop export was not found")
+		}
+		t.Cleanup(func() { _ = export.file.Close() })
+		if export.size != loopOffset+uint64(len(contents)) {
+			t.Fatalf("unexpected loop size: %d", export.size)
+		}
+		got := bytes.Repeat([]byte{255}, 4096)
+		if err := export.readAt(got, loopOffset-2048); err != nil ||
+			!bytes.Equal(got[:2048], make([]byte, 2048)) || !bytes.Equal(got[2048:], contents[:2048]) {
+			t.Fatalf("read across loop offset: %v", err)
+		}
+		if err := export.readAt(got, loopOffset); err != nil || !bytes.Equal(got, contents) {
+			t.Fatalf("read complete ISO through loop export: %v", err)
+		}
+		if err := export.readAt(got, 0); err != nil || !bytes.Equal(got, make([]byte, 4096)) {
+			t.Fatalf("read zero padding: %v", err)
+		}
+	})
+
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
